@@ -70,7 +70,20 @@ public final class ExternalPlayer {
 
     /** @return true when a player was launched. */
     public static boolean open(Context context, String url, String title, String preferredPackage) {
+        return open(context, url, title, preferredPackage, 0);
+    }
+
+    /**
+     * @param positionMs start position; VLC and MX Player read the "position" extra (milliseconds),
+     *                   other players ignore it and start from the beginning.
+     * @return true when a player was launched.
+     */
+    public static boolean open(Context context, String url, String title, String preferredPackage, long positionMs) {
         Intent intent = viewIntent(url, title == null ? "" : title);
+        if (positionMs > 0) {
+            intent.putExtra("position", positionMs);
+            intent.putExtra("from_start", false);
+        }
         if (preferredPackage != null && !preferredPackage.isEmpty()) intent.setPackage(preferredPackage);
         try {
             context.startActivity(intent);

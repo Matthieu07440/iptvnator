@@ -38,7 +38,7 @@ final class TvShellBridge {
                 String url = stringAt(args, 1);
                 String title = stringAt(args, 2);
                 if (url == null || title == null) return;
-                if (command.equals("openExternal")) activity.openExternal(url, title);
+                if (command.equals("openExternal")) activity.openExternal(url, title, longAt(args, 3));
                 else activity.offerExternal(url, title, command.equals("onPlaybackError"));
                 break;
             case "setKeepScreenOn":
@@ -67,5 +67,12 @@ final class TvShellBridge {
 
     private static String stringAt(List<?> args, int index) {
         return index < args.size() && args.get(index) instanceof String ? (String) args.get(index) : null;
+    }
+
+    /** A non-negative whole number argument (JSON numbers arrive as Number), else 0. */
+    private static long longAt(List<?> args, int index) {
+        if (index >= args.size() || !(args.get(index) instanceof Number)) return 0;
+        double value = ((Number) args.get(index)).doubleValue();
+        return value > 0 && value < Long.MAX_VALUE ? (long) value : 0;
     }
 }

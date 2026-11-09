@@ -80,10 +80,15 @@
             'transform:none!important;z-index:2147483647!important;background:#000!important;box-sizing:border-box!important}' +
             'video.' + FS_CLASS + ',.' + FS_CLASS + ' video{object-fit:contain!important}' +
             'video.' + FS_CLASS + '{width:100vw!important;height:100vh!important}' +
-            // A transformed/filtered ancestor would become the containing block of the
-            // fixed element and a low stacking context would put siblings above it.
+            // A transformed/filtered/contained ancestor would become the containing block
+            // of the fixed element and a low stacking context would put siblings above it.
+            // A transform animation (even a finished fill-forwards fade-in) and
+            // container-type (layout containment) trap it too: the movie detail shell
+            // has both, which left the "fullscreen" player offset and partly off screen.
             '.' + ANCESTOR_CLASS + '{transform:none!important;filter:none!important;perspective:none!important;' +
-            'contain:none!important;will-change:auto!important;z-index:2147483647!important}' +
+            'contain:none!important;will-change:auto!important;z-index:2147483647!important;' +
+            'animation:none!important;container-type:normal!important;backdrop-filter:none!important;' +
+            'content-visibility:visible!important;translate:none!important;scale:none!important;rotate:none!important}' +
             'html.' + ROOT_CLASS + ',html.' + ROOT_CLASS + ' body{overflow:hidden!important}';
         (document.head || document.documentElement).appendChild(style);
 
@@ -859,20 +864,54 @@
     /**
      * Android: a newly started stream goes straight to fullscreen. Some devices
      * (Fire TV Stick 4K) only show video that covers the screen, so the small
-     * player stays black while the stream plays. Once per source: after Back
-     * the player stays small until another stream starts.
+     * player stays black while the stream plays. Once per load: after Back the
+     * player stays small until a stream (or the same film again) is loaded.
      */
     function installAutoFullscreen() {
-        var lastSrc = null;
+        var armed = null; // the video that started loading and has not played yet
+        document.addEventListener('loadstart', function (event) {
+            if (event.target && event.target.tagName === 'VIDEO') armed = event.target;
+        }, true);
         document.addEventListener('playing', function (event) {
             var media = event.target;
-            if (!media || media.tagName !== 'VIDEO') return;
+            if (!media || media !== armed) return;
+            armed = null;
             if (!media.closest || !media.closest('app-web-player-view,.vjs-player-shell,.video-js')) return;
-            var src = media.currentSrc || media.src || '';
-            if (!src || src === lastSrc) return;
-            lastSrc = src;
             if (document.fullscreenElement) return;
             toggleFullscreen(media);
+        }, true);
+    }
+
+    /**
+     * Android: a video that plays with no audio decoded at all goes to the external
+     * player (VLC), at the same position. The WebView cannot decode AC-3 / E-AC-3,
+     * the usual audio of IPTV films (.mkv): the picture plays, silently. Checked once
+     * per source, a few seconds after playback starts.
+     */
+    var SILENT_CHECK_MS = 5000;
+    function installSilentFallback() {
+        var timer = null;
+        document.addEventListener('playing', function (event) {
+            var media = event.target;
+            if (!media || media.tagName !== 'VIDEO' || typeof media.webkitAudioDecodedByteCount !== 'number') return;
+            var src = media.currentSrc || media.src || '';
+            if (!src || media.__tvshellAudioChecked === src) return;
+            if (timer) clearTimeout(timer);
+            var startedAt = media.currentTime;
+            timer = setTimeout(function () {
+                timer = null;
+                if (!media.isConnected || media.paused || (media.currentSrc || media.src) !== src) return;
+                if (media.currentTime - startedAt < 2) return; // stalled: check again at the next "playing"
+                media.__tvshellAudioChecked = src;
+                if (media.muted || media.webkitAudioDecodedByteCount > 0) return;
+                var url = api.currentStreamUrl();
+                if (!url) return;
+                var positionMs = isFinite(media.duration) && media.duration > 0 ? Math.floor(media.currentTime * 1000) : 0;
+                log('no audio decoded: handing the stream to the external player');
+                media.pause();
+                if (document.fullscreenElement) document.exitFullscreen().catch(function () { /* ignore */ });
+                native('openExternal', url, lastMediaTitle || document.title || '', positionMs);
+            }, SILENT_CHECK_MS);
         }, true);
     }
 
@@ -1498,7 +1537,10 @@
         installClipboardHook();
         installHistoryTracking();
         installFocusMirror();
-        if (isAndroid) installAutoFullscreen();
+        if (isAndroid) {
+            installAutoFullscreen();
+            installSilentFallback();
+        }
         document.addEventListener('keydown', onKeyDown, true);
         // Keyups arrive in queue order: a keydown after one is a new press, however late it runs.
         document.addEventListener('keyup', function (e) {

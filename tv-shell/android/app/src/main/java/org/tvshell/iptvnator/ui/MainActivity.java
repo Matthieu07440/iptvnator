@@ -566,11 +566,16 @@ public class MainActivity extends Activity {
     }
 
     void openExternal(String url, String title) {
+        openExternal(url, title, 0);
+    }
+
+    /** @param positionMs where to start (a film handed over mid-way), 0 for the beginning. */
+    void openExternal(String url, String title, long positionMs) {
         if (url == null || url.trim().isEmpty()) {
             toast(getString(R.string.no_stream_to_open));
             return;
         }
-        ExternalPlayer.open(this, url.trim(), title, prefs.externalPlayerPackage());
+        ExternalPlayer.open(this, url.trim(), title, prefs.externalPlayerPackage(), positionMs);
     }
 
     /**
