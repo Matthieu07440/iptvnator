@@ -851,6 +851,26 @@
         return false;
     }
 
+    /**
+     * Android: a newly started stream goes straight to fullscreen. Some devices
+     * (Fire TV Stick 4K) only show video that covers the screen, so the small
+     * player stays black while the stream plays. Once per source: after Back
+     * the player stays small until another stream starts.
+     */
+    function installAutoFullscreen() {
+        var lastSrc = null;
+        document.addEventListener('playing', function (event) {
+            var media = event.target;
+            if (!media || media.tagName !== 'VIDEO') return;
+            if (!media.closest || !media.closest('app-web-player-view,.vjs-player-shell,.video-js')) return;
+            var src = media.currentSrc || media.src || '';
+            if (!src || src === lastSrc) return;
+            lastSrc = src;
+            if (document.fullscreenElement) return;
+            toggleFullscreen(media);
+        }, true);
+    }
+
     /** Select on the picture: go fullscreen (Back leaves it again). */
     function toggleFullscreen(media) {
         if (document.fullscreenElement) {
@@ -1473,6 +1493,7 @@
         installClipboardHook();
         installHistoryTracking();
         installFocusMirror();
+        if (isAndroid) installAutoFullscreen();
         document.addEventListener('keydown', onKeyDown, true);
         // Keyups arrive in queue order: a keydown after one is a new press, however late it runs.
         document.addEventListener('keyup', function (e) {
