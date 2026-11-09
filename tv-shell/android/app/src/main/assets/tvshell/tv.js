@@ -54,6 +54,118 @@
     var movePainted = true; // the last D-pad move has reached the screen (a held key waits for it)
     var keepScreenOn = false;
 
+    // ------------------------------------------------------ pseudo-fullscreen
+    // On Android the WebView already fills the screen. The native element
+    // fullscreen (WebChromeClient.onShowCustomView) hides the WebView behind
+    // Chromium's fullscreen view, which stays black on some devices (Fire TV
+    // Stick) and swallows the D-pad. Instead, emulate the Fullscreen API in CSS:
+    // the element is pinned over the page, the API reports it as the fullscreen
+    // element and fullscreenchange fires, so the app and this layer behave as
+    // with the real API. Installed before the Angular bundle (tv.js loads first).
+    if (isAndroid) {
+        installPseudoFullscreen();
+    }
+
+    function installPseudoFullscreen() {
+        var FS_CLASS = 'tvshell-pseudo-fs';
+        var ANCESTOR_CLASS = 'tvshell-pseudo-fs-ancestor';
+        var ROOT_CLASS = 'tvshell-pseudo-fs-active';
+        var current = null;
+
+        var style = document.createElement('style');
+        style.textContent =
+            '.' + FS_CLASS + '{position:fixed!important;left:0!important;top:0!important;right:0!important;bottom:0!important;' +
+            'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;' +
+            'min-width:0!important;min-height:0!important;margin:0!important;border:0!important;border-radius:0!important;' +
+            'transform:none!important;z-index:2147483647!important;background:#000!important;box-sizing:border-box!important}' +
+            'video.' + FS_CLASS + ',.' + FS_CLASS + ' video{object-fit:contain!important}' +
+            'video.' + FS_CLASS + '{width:100vw!important;height:100vh!important}' +
+            // A transformed/filtered ancestor would become the containing block of the
+            // fixed element and a low stacking context would put siblings above it.
+            '.' + ANCESTOR_CLASS + '{transform:none!important;filter:none!important;perspective:none!important;' +
+            'contain:none!important;will-change:auto!important;z-index:2147483647!important}' +
+            'html.' + ROOT_CLASS + ',html.' + ROOT_CLASS + ' body{overflow:hidden!important}';
+        (document.head || document.documentElement).appendChild(style);
+
+        function mark(el, on) {
+            el.classList.toggle(FS_CLASS, on);
+            for (var p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+                p.classList.toggle(ANCESTOR_CLASS, on);
+            }
+            document.documentElement.classList.toggle(ROOT_CLASS, on);
+        }
+
+        function fire(el) {
+            var target = el && el.isConnected ? el : document;
+            ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (type) {
+                try {
+                    target.dispatchEvent(new Event(type, { bubbles: true }));
+                } catch (e) {
+                    /* ignore */
+                }
+            });
+        }
+
+        function element() {
+            if (current && !current.isConnected) {
+                // The app re-rendered the player while it was "fullscreen".
+                var gone = current;
+                current = null;
+                mark(gone, false);
+            }
+            return current;
+        }
+
+        function enter(el) {
+            if (element() === el) return Promise.resolve();
+            if (current) mark(current, false);
+            current = el;
+            mark(el, true);
+            fire(el);
+            window.dispatchEvent(new Event('resize'));
+            return Promise.resolve();
+        }
+
+        function leave() {
+            var el = element();
+            if (!el) return Promise.resolve();
+            current = null;
+            mark(el, false);
+            fire(el);
+            window.dispatchEvent(new Event('resize'));
+            return Promise.resolve();
+        }
+
+        function request() {
+            return enter(this);
+        }
+
+        function define(proto, name, getter) {
+            try {
+                Object.defineProperty(proto, name, { configurable: true, enumerable: true, get: getter });
+            } catch (e) {
+                /* ignore */
+            }
+        }
+
+        Element.prototype.requestFullscreen = request;
+        Element.prototype.webkitRequestFullscreen = request;
+        Element.prototype.webkitRequestFullScreen = request;
+        HTMLVideoElement.prototype.webkitEnterFullscreen = request;
+        HTMLVideoElement.prototype.webkitEnterFullScreen = request;
+        Document.prototype.exitFullscreen = leave;
+        Document.prototype.webkitExitFullscreen = leave;
+        Document.prototype.webkitCancelFullScreen = leave;
+        HTMLVideoElement.prototype.webkitExitFullscreen = leave;
+        define(Document.prototype, 'fullscreenElement', element);
+        define(Document.prototype, 'webkitFullscreenElement', element);
+        define(Document.prototype, 'webkitCurrentFullScreenElement', element);
+        define(Document.prototype, 'fullscreen', function () { return !!element(); });
+        define(Document.prototype, 'webkitIsFullScreen', function () { return !!element(); });
+        define(Document.prototype, 'fullscreenEnabled', function () { return true; });
+        define(Document.prototype, 'webkitFullscreenEnabled', function () { return true; });
+    }
+
     // --------------------------------------------------------------- bridge
     function native(method) {
         var args = Array.prototype.slice.call(arguments, 1);
