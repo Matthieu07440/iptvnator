@@ -592,9 +592,133 @@
         return true;
     }
 
+    // ------------------------------------------------------ column navigation
+    // Screens laid out in columns (rail | categories | channels | player): ◀ ▶ jump
+    // straight to the next column instead of stepping through each row's buttons,
+    // and land on the column's current item: the picture, the open section, category
+    // or playing channel, else the place focus last was in that column. Grids, toolbars,
+    // overlays and fullscreen keep plain spatial navigation.
+    var SELECTED_SELECTOR = '[aria-selected="true"],[aria-current]:not([aria-current="false"]),.active,.is-active,.selected,' +
+        '.mdc-list-item--activated,.mat-mdc-list-item-activated';
+    var ROW_SELECTOR = '[data-test-id="channel-item"],.channel-list-item,mat-list-item,.mat-mdc-list-item,[role="option"],[role="row"],li';
+    var recentFocus = []; // most recent first, a few dozen elements
+
+    function rememberFocus(el) {
+        var i = recentFocus.indexOf(el);
+        if (i !== -1) recentFocus.splice(i, 1);
+        recentFocus.unshift(el);
+        if (recentFocus.length > 40) recentFocus.length = 40;
+    }
+
+    /** A column: at least half the screen tall and at most 60% of its width. */
+    function isColumn(el) {
+        var r = el.getBoundingClientRect();
+        return r.height >= window.innerHeight * 0.5 && r.width <= window.innerWidth * 0.6 && r.width >= 32;
+    }
+
+    /** The innermost column holding el (el itself counts), or null on a grid or a toolbar. */
+    function columnOf(el) {
+        for (var p = el; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+            if (isColumn(p)) return p;
+        }
+        return null;
+    }
+
+    /** The widest column around el that still leaves `from` (the column being left) outside. */
+    function outerColumn(el, from) {
+        var best = null;
+        for (var p = el; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+            if (p.contains(from)) break;
+            if (isColumn(p)) best = p;
+        }
+        return best;
+    }
+
+    /** True when el is a secondary button of a list row (favourite, details) with a sibling that way. */
+    function stepsAlongRow(el, dir, column) {
+        var row = el.closest(ROW_SELECTOR);
+        if (!row || row === column || !column.contains(row)) return false;
+        var inRow = candidates(row, null);
+        if (inRow.length < 2 || inRow[0].el === el || el.contains(inRow[0].el)) return false;
+        var a = rectOf(el);
+        for (var i = 0; i < inRow.length; i++) {
+            var r = inRow[i].rect;
+            if (inRow[i].el !== el && (dir === 'right' ? r.left >= a.right - 1 : r.right <= a.left + 1)) return true;
+        }
+        return false;
+    }
+
+    /** Where focus lands in a column: picture, last focus there, current item, else level with `from`. */
+    function landingIn(column, from) {
+        var list = candidates(column, null);
+        if (isCandidateElement(column)) list.push({ el: column, rect: rectOf(column) });
+        if (!list.length) return null;
+        var i;
+        for (i = 0; i < list.length; i++) if (list[i].el.tagName === 'VIDEO') return list[i].el;
+        for (i = 0; i < list.length; i++) {
+            var el = list[i].el;
+            if (el.matches(SELECTED_SELECTOR)) return el;
+            // The row is marked (the playing channel), not its main button.
+            var row = el.parentElement && el.parentElement.closest(ROW_SELECTOR);
+            if (row && column.contains(row) && row.matches(SELECTED_SELECTOR)) {
+                var main = candidates(row, null);
+                if (main.length && main[0].el === el) return el;
+            }
+        }
+        for (var k = 0; k < recentFocus.length; k++) {
+            var past = recentFocus[k];
+            if (!past.isConnected || !column.contains(past)) continue;
+            for (i = 0; i < list.length; i++) if (list[i].el === past) return past;
+        }
+        var cy = (from.top + from.bottom) / 2;
+        var best = null, bestScore = Infinity;
+        for (i = 0; i < list.length; i++) {
+            var r = list[i].rect;
+            var score = Math.abs((r.top + r.bottom) / 2 - cy) + 1;
+            if (/mat-mdc-icon-button/.test(list[i].el.className || '')) score *= 3; // content over chrome
+            if (score < bestScore) {
+                bestScore = score;
+                best = list[i].el;
+            }
+        }
+        return best;
+    }
+
+    function isCandidateElement(el) {
+        return el.matches(CANDIDATE_SELECTOR) && isShown(el) && !isDisabled(el) && ensureFocusable(el) && !isContainerFocus(el);
+    }
+
+    /** ◀ ▶ between columns. False when the screen is not in columns there: plain navigation then. */
+    function columnJump(dir, active) {
+        if (!active || active === document.body || !active.isConnected) return false;
+        var column = columnOf(active);
+        if (!column || stepsAlongRow(active, dir, column)) return false;
+        var c = column.getBoundingClientRect();
+        var list = candidates(document, active, true);
+        var ahead = [];
+        for (var i = 0; i < list.length; i++) {
+            var el = list[i].el;
+            if (column.contains(el)) continue;
+            var gap = dir === 'right' ? list[i].rect.left - c.right : c.left - list[i].rect.right;
+            if (gap >= -4) ahead.push({ el: el, gap: gap });
+        }
+        ahead.sort(function (a, b) { return a.gap - b.gap; });
+        for (i = 0; i < ahead.length; i++) {
+            if (!qualifies(ahead[i].el)) continue;
+            var target = outerColumn(ahead[i].el, column);
+            if (!target) continue;
+            var landing = landingIn(target, rectOf(active));
+            if (!landing) continue;
+            setFocus(landing);
+            return true;
+        }
+        return false;
+    }
+
     function move(dir, retried) {
         var scope = navigationScope();
         var active = document.activeElement;
+        if (!retried && (dir === 'left' || dir === 'right') && scope === document && columnJump(dir, active)) return true;
         if (!retried && isContainerFocus(active) && enterContainer(active)) return true;
         var exclude = active && active !== document.body ? active : null;
         var src = sourceRect();
@@ -671,6 +795,13 @@
         return end < el.value.length;
     }
 
+    var LIVE_LAYOUT_SELECTOR = 'app-live-stream-layout,app-stalker-live-stream-layout';
+
+    function isSeekable(media) {
+        if (media.closest(LIVE_LAYOUT_SELECTOR)) return false;
+        return isFinite(media.duration) && media.duration > 0;
+    }
+
     function passThroughArrow(el, dir) {
         if (!el || el === document.body) return false;
         var horizontal = dir === 'left' || dir === 'right';
@@ -678,7 +809,9 @@
         // On the video: Left/Right stay with the app (seek); Up/Down navigate
         // to the player controls and the rest of the page (the TV remote owns
         // the volume anyway).
-        if (tag === 'VIDEO' || tag === 'AUDIO') return horizontal;
+        // A live channel (or a picture with no known length) has nothing to seek:
+        // outside fullscreen ◀ ▶ go to the next column.
+        if (tag === 'VIDEO' || tag === 'AUDIO') return horizontal && (!!document.fullscreenElement || isSeekable(el));
         // Expanded comboboxes keep Up/Down for their active descendant; horizontal
         // arrows follow the input caret rule so the remote can reach other controls.
         var role = el.getAttribute('role');
@@ -785,6 +918,12 @@
             event.stopImmediatePropagation();
             if (active && (active.tagName === 'VIDEO' || active.tagName === 'AUDIO')) {
                 revealPlayerControls(active);
+                if (dir === 'left' || dir === 'right') {
+                    // A picture with nothing to seek: ◀ ▶ only change column. With no
+                    // column that way the focus stays on the picture.
+                    if (navigationScope() === document) columnJump(dir, active);
+                    return;
+                }
                 var player = active.closest('[class*="player-shell"]');
                 var dock = dir === 'down' && player && player.querySelector('.player-controls__bar');
                 if (dock && navigationScope().contains(dock)) {
@@ -1040,6 +1179,18 @@
             if (pane) {
                 var first = pane.querySelector('[role="menuitem"]:not([disabled])');
                 if (first) setFocus(first, { silent: true });
+                return;
+            }
+            // No context menu: Menu on a list row reaches its own buttons (favourite,
+            // details), which ◀ ▶ skip when they jump between columns.
+            var row = document.activeElement === active && active.closest(ROW_SELECTOR);
+            if (!row) return;
+            var inRow = candidates(row, null);
+            for (var i = 0; i < inRow.length; i++) {
+                if (inRow[i].el !== active && !inRow[i].el.contains(active) && !active.contains(inRow[i].el) && i > 0) {
+                    setFocus(inRow[i].el);
+                    return;
+                }
             }
         }, 150);
         return true;
@@ -1518,6 +1669,7 @@
             for (var i = 0; i < previous.length; i++) if (previous[i] !== t) previous[i].classList.remove(FOCUS_CLASS);
             paintFocus(t);
             lastRect = rectOf(t);
+            rememberFocus(t);
         }, true);
         // When the focused element disappears (virtual scroll recycling, route
         // change), re-establish focus near the previous position.

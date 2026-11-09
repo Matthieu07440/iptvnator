@@ -234,6 +234,53 @@ const streamUrl = await page.evaluate(() => window.__tvShell.currentStreamUrl())
 console.log('  after Enter on channel:', st.active);
 check(!!streamUrl, 'stream URL known for the external player: ' + streamUrl);
 
+console.log('4b. ◀ ▶ jump between the columns: rail | categories | channels | player');
+{
+    // The playing channel is the row the app marks active (not necessarily where focus is).
+    const playingName = await page.evaluate(() => {
+        const row = document.querySelector('.channel-list-item.active .channel-content');
+        return row ? row.textContent.trim().slice(0, 20) : null;
+    });
+    check(!!playingName, 'the app marks the playing channel: ' + playingName);
+    const isPlaying = (f) => /channel-content/.test(f) && !!playingName && f.includes(playingName);
+    const stops = [];
+    const stop = async (k) => {
+        const f = (await key(k, 1, 300)) || '∅';
+        stops.push(k.replace('Arrow', '') + '→' + f.slice(0, 70));
+        return f;
+    };
+    // The player column: the picture, not a row button or a dock button on the way.
+    let f2 = await stop('ArrowRight');
+    check(/^video/.test(f2), 'Right from the playing channel lands on the picture: ' + f2);
+    // A live picture outside fullscreen: Left leaves it for the channel list, on the playing channel.
+    f2 = await stop('ArrowLeft');
+    check(isPlaying(f2), 'Left from the picture returns to the playing channel: ' + f2);
+    f2 = await stop('ArrowLeft');
+    check(/category-item/.test(f2), 'Left from the channels lands in the categories: ' + f2);
+    const category = f2;
+    f2 = await stop('ArrowLeft');
+    check(/portal-rail-link.*\[Live TV\]/.test(f2), 'Left from the categories lands on the rail, on Live TV: ' + f2);
+    f2 = await stop('ArrowRight');
+    check(f2 === category, 'Right from the rail returns to the same category: ' + f2);
+    f2 = await stop('ArrowRight');
+    check(isPlaying(f2), 'Right from the categories returns to the playing channel: ' + f2);
+    console.log('  ' + stops.join('\n  '));
+    // The row's own buttons stay reachable: Menu on a row without a context menu focuses them.
+    await page.evaluate(() => window.__tvShell.menu());
+    await page.waitForTimeout(400);
+    st = await state();
+    const rowButton = st.scope === 'document' ? st.active : '';
+    console.log('  Menu on the channel row →', st.scope, st.active);
+    if (st.scope === 'document') {
+        check(/Favorite|favorite|info|details/i.test(rowButton), 'Menu on a row reaches its own buttons: ' + rowButton);
+        f2 = await stop('ArrowLeft');
+        check(/channel-content/.test(f2), 'Left from a row button returns to the row: ' + f2);
+    } else {
+        await page.evaluate(() => window.__tvShell.back());
+        await page.waitForTimeout(400);
+    }
+}
+
 console.log('5. Back / Menu');
 let handled = await page.evaluate(() => window.__tvShell.back());
 await page.waitForTimeout(800);

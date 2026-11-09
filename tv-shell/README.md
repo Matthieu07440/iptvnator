@@ -195,10 +195,10 @@ cd tv-shell/android && ./gradlew :backend:check :app:assembleRelease
 
 | Remote | Action |
 | --- | --- |
-| D-pad | move between elements; on the picture: ◀ ▶ seek, ▲ ▼ leave the picture / reach the controls; in a text field the arrows move the caret until it cannot move further; in the source switcher's search: ▲ ▼ highlight a source without leaving the field |
+| D-pad | move between elements; on screens laid out in columns (rail, categories, channels, player) ◀ ▶ jump to the next column and land on its current item (the picture, the last item focused there, the open category or the playing channel); on the picture: ◀ ▶ seek (a live stream outside fullscreen: next column), ▲ ▼ leave the picture / reach the controls; in a text field the arrows move the caret until it cannot move further; in the source switcher's search: ▲ ▼ highlight a source without leaving the field |
 | OK | activate; on the picture: fullscreen; on a text field: keyboard. A held OK is one activation |
 | Back | close dialog/menu → leave fullscreen → previous page → (twice) exit the app; **hold**: IPTVnator settings (remotes without a Menu key) |
-| Menu | context menu of the focused item; on the picture: open the stream in VLC; **long press**: IPTVnator settings. The HDMI-CEC context-menu key and Y on a game controller do the same |
+| Menu | context menu of the focused item (without one, on a list row: the row's own buttons, e.g. favourite and details); on the picture: open the stream in VLC; **long press**: IPTVnator settings. The HDMI-CEC context-menu key and Y on a game controller do the same |
 | ▶⏸ ⏪ ⏩ | play/pause, −15 s, +30 s |
 
 ## Design notes
