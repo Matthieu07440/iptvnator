@@ -198,7 +198,12 @@
         style.textContent =
             '.' + FOCUS_CLASS + '{outline:3px solid var(--app-focus-ring,#7cc4ff)!important;outline-offset:2px!important;' +
             'scroll-margin:32px;box-shadow:0 0 0 3px rgba(0,0,0,.55)!important;border-radius:6px}' +
-            'video.' + FOCUS_CLASS + '{outline-offset:-3px!important}' +
+            // On Android nothing may be drawn over the picture: an outline, shadow or
+            // rounded corner on the <video> keeps it off the hardware video plane,
+            // and the Fire TV Stick then shows a black picture (sound only).
+            (isAndroid
+                ? 'video.' + FOCUS_CLASS + '{outline:none!important;box-shadow:none!important;border-radius:0!important}'
+                : 'video.' + FOCUS_CLASS + '{outline-offset:-3px!important}') +
             'body.tv-shell *{cursor:none!important}' +
             'body.tv-shell ::-webkit-scrollbar{width:0;height:0}' +
             (fullMotion() ? '' : LITE_MOTION_CSS);
