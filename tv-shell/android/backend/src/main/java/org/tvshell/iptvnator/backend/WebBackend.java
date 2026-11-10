@@ -42,6 +42,10 @@ public class WebBackend {
         public final String contentType;
         public final Map<String, String> headers = new LinkedHashMap<String, String>();
         private final Utf8Sink body;
+        /** A body made of a spooled provider answer between two small parts; null for {@link #body}. */
+        private final byte[] head;
+        private final HttpFetcher.Spooled spooled;
+        private final byte[] tail;
 
         public Response(int status, String contentType, byte[] body) {
             this(status, contentType, Utf8Sink.of(body));
@@ -51,22 +55,77 @@ public class WebBackend {
             this.status = status;
             this.contentType = contentType;
             this.body = body;
+            this.head = null;
+            this.spooled = null;
+            this.tail = null;
+            headers.put("Cache-Control", "no-store");
+        }
+
+        /** {@code head}, the spooled file, {@code tail}: the file is deleted once its stream is closed. */
+        Response(int status, String contentType, byte[] head, HttpFetcher.Spooled spooled, byte[] tail) {
+            this.status = status;
+            this.contentType = contentType;
+            this.body = null;
+            this.head = head;
+            this.spooled = spooled;
+            this.tail = tail;
             headers.put("Cache-Control", "no-store");
         }
 
         /** The body size in bytes (the Content-Length). */
         public long bodyLength() {
-            return body.length();
+            return body != null ? body.length() : head.length + spooled.length + tail.length;
         }
 
-        /** The body, read from its chunks in place; a new stream per call. */
+        /**
+         * The body, read from its chunks in place; a new stream per call. A spooled body is
+         * served once: closing its stream deletes the file.
+         */
         public InputStream openBody() {
-            return body.openStream();
+            if (body != null) return body.openStream();
+            final HttpFetcher.Spooled file = spooled;
+            InputStream middle;
+            try {
+                middle = new java.io.FileInputStream(file.file);
+            } catch (java.io.FileNotFoundException e) {
+                file.delete();
+                middle = new java.io.ByteArrayInputStream(new byte[0]);
+            }
+            java.util.List<InputStream> parts = java.util.Arrays.<InputStream>asList(
+                new java.io.ByteArrayInputStream(head), middle, new java.io.ByteArrayInputStream(tail));
+            return new java.io.SequenceInputStream(java.util.Collections.enumeration(parts)) {
+                private boolean closed;
+
+                @Override
+                public void close() throws java.io.IOException {
+                    if (closed) return;
+                    closed = true;
+                    try {
+                        super.close();
+                    } finally {
+                        file.delete();
+                    }
+                }
+            };
+        }
+
+        /** Releases a body that will not be served (a spooled file). */
+        public void discard() {
+            if (spooled != null) spooled.delete();
         }
 
         /** The body as one array (a copy): for tests and small answers. */
         public byte[] bodyBytes() {
-            return body.toByteArray();
+            if (body != null) return body.toByteArray();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            try (InputStream in = openBody()) {
+                byte[] buffer = new byte[16 * 1024];
+                int read;
+                while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+            return out.toByteArray();
         }
 
         public String bodyText() {
@@ -78,9 +137,27 @@ public class WebBackend {
     private final String runtimeBackendUrl;
     private final Map<String, String> providerTargets = new ConcurrentHashMap<String, String>();
 
+    /**
+     * Where Xtream answers are written while they are received, or null to hold them in the heap
+     * (capped at {@link HttpFetcher#MAX_BODY_BYTES}).
+     */
+    private final java.io.File spoolDir;
+
+    /** An answer up to this size goes back through the heap path (validated, lenient JSON rebuilt). */
+    static final long SPOOL_IN_HEAP_BYTES = 4L * 1024 * 1024;
+    /** The largest spooled answer: a catalogue several times bigger than the largest panels'. */
+    static final long MAX_SPOOL_BYTES = 512L * 1024 * 1024;
+    /** A spooled file never served (its request dropped) is removed by the next spool after this. */
+    static final long STALE_SPOOL_MS = 15L * 60 * 1000;
+
     public WebBackend(HttpFetcher fetcher, String runtimeBackendUrl) {
+        this(fetcher, runtimeBackendUrl, null);
+    }
+
+    public WebBackend(HttpFetcher fetcher, String runtimeBackendUrl, java.io.File spoolDir) {
         this.fetcher = fetcher;
         this.runtimeBackendUrl = runtimeBackendUrl;
+        this.spoolDir = spoolDir;
     }
 
     // ---------------------------------------------------------------- entry
@@ -195,6 +272,43 @@ public class WebBackend {
         return new Response(200, JSON_TYPE, record);
     }
 
+    /**
+     * An Xtream answer received into a file: a small one continues as {@link #xtream} would
+     * (validated, lenient JSON rebuilt), a large JSON one is served from the file inside the
+     * {@code { action, payload }} envelope, so a 100 MB catalogue never sits in the heap.
+     */
+    private Response xtreamSpooled(String action, String requestUrl, Map<String, String> headers) throws ProviderException {
+        purgeStaleSpool();
+        HttpFetcher.Spooled spooled = fetcher.spool(requestUrl, headers, TIMEOUT_XTREAM_MS, spoolDir, MAX_SPOOL_BYTES);
+        if (spooled.length <= SPOOL_IN_HEAP_BYTES || !spooled.json) {
+            if (spooled.length > HttpFetcher.MAX_BODY_BYTES) {
+                spooled.delete();
+                throw HttpFetcher.tooLarge();
+            }
+            String body;
+            try {
+                body = spooled.readTextAndDelete();
+            } catch (java.io.IOException e) {
+                throw HttpFetcher.mapNetworkError(e);
+            }
+            Map<String, Object> out = Json.object();
+            out.put("action", action);
+            out.put("payload", payloadOf(body));
+            return json(200, out);
+        }
+        byte[] head = ("{\"action\":" + Json.write(action) + ",\"payload\":").getBytes(UTF8);
+        return new Response(200, JSON_TYPE, head, spooled, "}".getBytes(UTF8));
+    }
+
+    private void purgeStaleSpool() {
+        java.io.File[] files = spoolDir.listFiles();
+        if (files == null) return;
+        long now = System.currentTimeMillis();
+        for (java.io.File file : files) {
+            if (now - file.lastModified() > STALE_SPOOL_MS) file.delete();
+        }
+    }
+
     private Response xtream(Map<String, String> query) {
         Object target = registeredTarget(query);
         if (target instanceof Response) return (Response) target;
@@ -208,6 +322,7 @@ public class WebBackend {
             String userAgent = query.get("userAgent");
             if (userAgent != null) headers.put("User-Agent", userAgent);
             String requestUrl = PortalUrls.withQuery(PortalUrls.xtreamApiUrl(base), params);
+            if (!connectionTest && spoolDir != null) return xtreamSpooled(action, requestUrl, headers);
             HttpFetcher.Result result = connectionTest
                 ? fetcher.testConnection(requestUrl, headers, TIMEOUT_XTREAM_MS)
                 : fetcher.get(requestUrl, headers, TIMEOUT_XTREAM_MS);

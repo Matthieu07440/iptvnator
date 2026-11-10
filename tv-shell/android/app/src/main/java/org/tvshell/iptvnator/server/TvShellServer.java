@@ -51,7 +51,7 @@ public final class TvShellServer extends NanoHTTPD {
                 return readAsset(relativePath);
             }
         }, "/api", prefs.layoutWidth());
-        this.backend = new WebBackend(new AndroidHttpFetcher(), "/api");
+        this.backend = new WebBackend(new AndroidHttpFetcher(), "/api", spoolDir(context));
         setAsyncRunner(new DefaultAsyncRunner() {
             @Override
             public void exec(ClientHandler handler) {
@@ -82,6 +82,25 @@ public final class TvShellServer extends NanoHTTPD {
                 }
             }
         };
+    }
+
+    /**
+     * Xtream catalogues are received into files here and served from them (see WebBackend):
+     * the largest panels answer 50 to 100 MB, more than the heap can hold several times over.
+     * Emptied at start: nothing in it outlives the request that wrote it. Null (heap only)
+     * when the cache directory cannot be used.
+     */
+    private static java.io.File spoolDir(Context context) {
+        java.io.File dir = new java.io.File(context.getApplicationContext().getCacheDir(), "provider-spool");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            Log.w(ShellApp.TAG, "cannot create the provider spool directory");
+            return null;
+        }
+        java.io.File[] leftovers = dir.listFiles();
+        if (leftovers != null) {
+            for (java.io.File file : leftovers) file.delete();
+        }
+        return dir;
     }
 
     public void start() throws IOException {

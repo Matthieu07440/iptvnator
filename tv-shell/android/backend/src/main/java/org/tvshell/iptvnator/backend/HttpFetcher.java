@@ -1,9 +1,13 @@
 package org.tvshell.iptvnator.backend;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
@@ -62,14 +66,16 @@ public class HttpFetcher {
 
     private static final class EncodedBody extends FilterInputStream {
         private final long declared;
+        private final long limit;
         private final byte[] singleByte = new byte[1];
         private long count;
         private boolean eof;
         private IOException failure;
 
-        EncodedBody(InputStream in, long declared) {
+        EncodedBody(InputStream in, long declared, long limit) {
             super(in);
             this.declared = declared;
+            this.limit = limit;
         }
 
         @Override
@@ -83,7 +89,7 @@ public class HttpFetcher {
                 int read = super.read(buffer, offset, length);
                 if (read == -1) eof = true;
                 else count += read;
-                if (count > MAX_BODY_BYTES) throw new TooLargeException();
+                if (count > limit) throw new TooLargeException();
                 return read;
             } catch (IOException e) {
                 failure = e;
@@ -144,21 +150,122 @@ public class HttpFetcher {
         boolean initialResponded;
     }
 
-    public Result get(String url, Map<String, String> headers, int timeoutMs) throws ProviderException {
-        RequestProgress progress = new RequestProgress();
-        try {
-            return fetch(url, headers, timeoutMs, progress);
-        } catch (ProviderException failure) {
-            failure.initialResponded |= progress.initialResponded;
-            throw failure;
+    /**
+     * A provider answer written, decoded, to a file instead of the heap ({@link #spool}): an
+     * Xtream catalogue of a large panel (160,000 films, 64,000 series) is 50 to 100 MB of JSON,
+     * which costs several times that once held as bytes and a String.
+     */
+    public static final class Spooled {
+        public final int status;
+        public final String contentType;
+        public final File file;
+        public final long length;
+        /** The body starts (after a BOM and whitespace) with '{' or '['; see {@link JsonSpoolSink}. */
+        public final boolean json;
+
+        public Spooled(int status, String contentType, File file, long length, boolean json) {
+            this.status = status;
+            this.contentType = contentType;
+            this.file = file;
+            this.length = length;
+            this.json = json;
         }
+
+        /** The body as text (UTF-8), the file deleted: for answers small enough for the heap. */
+        public String readTextAndDelete() throws IOException {
+            try (InputStream in = new FileInputStream(file)) {
+                return new String(readAll(in, length, Math.max(length, 0)), UTF8);
+            } finally {
+                delete();
+            }
+        }
+
+        public void delete() {
+            if (!file.delete() && file.exists()) file.deleteOnExit();
+        }
+    }
+
+    /** Consumes a 2xx body; {@code declared} is the plain size, -1 when unknown or compressed. */
+    private interface BodyReader<T> {
+        T read(InputStream in, long declared, int status, String contentType) throws IOException;
+    }
+
+    public Result get(String url, Map<String, String> headers, int timeoutMs) throws ProviderException {
+        return request(url, headers, timeoutMs, MAX_BODY_BYTES, new BodyReader<Result>() {
+            @Override
+            public Result read(InputStream in, long declared, int status, String contentType) throws IOException {
+                byte[] body = readAll(in, declared, MAX_BODY_BYTES);
+                return new Result(status, new String(body, charsetOf(contentType)), contentType);
+            }
+        });
+    }
+
+    /**
+     * GET {@code url} and write the decoded body, re-encoded as UTF-8, to a new file in
+     * {@code dir}, at most {@code limit} bytes. JSON is made acceptable to a browser's JSON.parse
+     * on the way ({@link JsonSpoolSink}). Nothing of the body stays in the heap.
+     */
+    public Spooled spool(String url, Map<String, String> headers, int timeoutMs, final File dir, final long limit)
+        throws ProviderException {
+        return request(url, headers, timeoutMs, limit, new BodyReader<Spooled>() {
+            @Override
+            public Spooled read(InputStream in, long declared, int status, String contentType) throws IOException {
+                File file = File.createTempFile("provider-", ".body", dir);
+                boolean kept = false;
+                try (OutputStream fileOut = new FileOutputStream(file)) {
+                    JsonSpoolSink sink = new JsonSpoolSink(fileOut);
+                    Charset charset = charsetOf(contentType);
+                    byte[] buffer = new byte[64 * 1024];
+                    long total = 0;
+                    if (UTF8.equals(charset)) {
+                        int read;
+                        while ((read = in.read(buffer)) != -1) {
+                            total += read;
+                            if (total > limit) throw new TooLargeException();
+                            sink.write(buffer, 0, read);
+                        }
+                        if (declared >= 0 && total != declared) throw new IOException("Incomplete provider response");
+                    } else {
+                        // A panel answering in another charset: re-encoded, the file is always UTF-8.
+                        java.io.Reader reader = new java.io.InputStreamReader(in, charset);
+                        java.io.Writer writer = new java.io.OutputStreamWriter(sink, UTF8);
+                        char[] chars = new char[16 * 1024];
+                        int read;
+                        while ((read = reader.read(chars)) != -1) {
+                            total += read;
+                            if (total > limit) throw new TooLargeException();
+                            writer.write(chars, 0, read);
+                        }
+                        writer.flush();
+                    }
+                    sink.finish();
+                    if (sink.written() > limit) throw new TooLargeException();
+                    kept = true;
+                    return new Spooled(status, contentType, file, sink.written(), sink.isJson());
+                } finally {
+                    if (!kept && !file.delete() && file.exists()) file.deleteOnExit();
+                }
+            }
+        });
     }
 
     public Result testConnection(String url, Map<String, String> headers, int timeoutMs) throws ProviderException {
         return get(url, headers, timeoutMs);
     }
 
-    private Result fetch(String url, Map<String, String> headers, int timeoutMs, RequestProgress progress) throws ProviderException {
+    private <T> T request(String url, Map<String, String> headers, int timeoutMs, long limit, BodyReader<T> reader)
+        throws ProviderException {
+        RequestProgress progress = new RequestProgress();
+        try {
+            return fetch(url, headers, timeoutMs, progress, limit, reader);
+        } catch (ProviderException failure) {
+            failure.initialResponded |= progress.initialResponded;
+            throw failure;
+        }
+    }
+
+    private <T> T fetch(String url, Map<String, String> headers, int timeoutMs, RequestProgress progress, long limit,
+        BodyReader<T> reader) throws ProviderException {
         Set<String> visited = new HashSet<String>();
         String current = url;
         for (int redirects = 0; ; redirects++) {
@@ -231,7 +338,7 @@ public class HttpFetcher {
                 String contentType = connection.getContentType();
                 // Declared size first: an oversized answer is refused before a byte of it is read.
                 long declared = connection.getContentLengthLong();
-                if (declared > MAX_BODY_BYTES) throw tooLarge();
+                if (declared > limit) throw tooLarge();
                 InputStream in;
                 try {
                     in = connection.getInputStream();
@@ -243,11 +350,18 @@ public class HttpFetcher {
                 boolean gzip = encoding.contains("gzip");
                 boolean compressed = gzip || encoding.contains("deflate");
                 try {
-                    EncodedBody wire = compressed ? new EncodedBody(in, declared) : null;
+                    EncodedBody wire = compressed ? new EncodedBody(in, declared, limit) : null;
                     if (wire != null) in = gzip ? new GZIPInputStream(wire) : new InflaterInputStream(wire);
-                    byte[] body = readAll(in, compressed ? -1 : declared, MAX_BODY_BYTES);
-                    if (wire != null) wire.requireComplete();
-                    return new Result(status, new String(body, charsetOf(contentType)), contentType);
+                    T body = reader.read(in, compressed ? -1 : declared, status, contentType);
+                    if (wire != null) {
+                        try {
+                            wire.requireComplete();
+                        } catch (IOException e) {
+                            if (body instanceof Spooled) ((Spooled) body).delete();
+                            throw e;
+                        }
+                    }
+                    return body;
                 } catch (TooLargeException e) {
                     throw tooLarge();
                 } catch (IOException e) {

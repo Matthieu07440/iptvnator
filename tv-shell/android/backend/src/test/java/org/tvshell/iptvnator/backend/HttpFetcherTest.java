@@ -150,6 +150,138 @@ public class HttpFetcherTest {
         }
     }
 
+    private static String sanitized(byte[] input, int chunk) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        JsonSpoolSink sink = new JsonSpoolSink(out);
+        for (int i = 0; i < input.length; i += chunk) sink.write(input, i, Math.min(chunk, input.length - i));
+        sink.finish();
+        assertEquals("written counts the output", Long.valueOf(out.size()), Long.valueOf(sink.written()));
+        return new String(out.toByteArray(), "UTF-8");
+    }
+
+    public void testSpoolSinkMakesJsonParseableByABrowser() throws Exception {
+        byte[] raw = "﻿ [{\"plot\":\"a\nb\tc \\\" \\\\\",\"t\":\"é\u0001\"}]".getBytes("UTF-8");
+        for (int chunk : new int[] { 1, 2, 3, 7, 4096 }) {
+            String text = sanitized(raw, chunk);
+            assertEquals("BOM dropped, controls escaped in strings (chunk " + chunk + ")",
+                " [{\"plot\":\"a\\u000ab\\u0009c \\\" \\\\\",\"t\":\"é\\u0001\"}]", text);
+            assertTrue("valid for JSON.parse", Json.validate(text));
+        }
+        assertEquals("structure whitespace kept", "{\n\t\"a\" : 1\n}", sanitized("{\n\t\"a\" : 1\n}".getBytes("UTF-8"), 3));
+        assertEquals("not JSON: unchanged", "Access\tdenied\n", sanitized("Access\tdenied\n".getBytes("UTF-8"), 2));
+        ByteArrayOutputStream partial = new ByteArrayOutputStream();
+        JsonSpoolSink sink = new JsonSpoolSink(partial);
+        sink.write(new byte[] { (byte) 0xEF, (byte) 0xBB }, 0, 2);
+        sink.finish();
+        assertEquals("a partial BOM at the end is kept", 2, Integer.valueOf(partial.size()));
+    }
+
+    /** Serves one body (optionally gzipped) to every request. */
+    private static final class FixedBodyServer implements AutoCloseable {
+        private final ServerSocket listener = new ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress());
+        private final Thread thread;
+
+        FixedBodyServer(final byte[] body, final boolean gzip) throws IOException {
+            thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    while (!listener.isClosed()) {
+                        try (Socket socket = listener.accept()) {
+                            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), "UTF-8"));
+                            String line;
+                            while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                                // request headers
+                            }
+                            byte[] payload = body;
+                            if (gzip) {
+                                ByteArrayOutputStream zipped = new ByteArrayOutputStream();
+                                try (GZIPOutputStream out = new GZIPOutputStream(zipped)) {
+                                    out.write(body);
+                                }
+                                payload = zipped.toByteArray();
+                            }
+                            String head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + payload.length
+                                + (gzip ? "\r\nContent-Encoding: gzip" : "") + "\r\nConnection: close\r\n\r\n";
+                            socket.getOutputStream().write(head.getBytes("UTF-8"));
+                            socket.getOutputStream().write(payload);
+                            socket.getOutputStream().flush();
+                        } catch (IOException e) {
+                            // listener closed, or the client went away
+                        }
+                    }
+                }
+            });
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        String url() {
+            return "http://127.0.0.1:" + listener.getLocalPort();
+        }
+
+        @Override
+        public void close() throws Exception {
+            listener.close();
+            thread.join(3000);
+        }
+    }
+
+    private static java.io.File newSpoolDir() throws IOException {
+        java.io.File dir = java.nio.file.Files.createTempDirectory("spool-test").toFile();
+        dir.deleteOnExit();
+        return dir;
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testLargeXtreamAnswerIsServedFromAFile() throws Exception {
+        // Over SPOOL_IN_HEAP_BYTES, with a raw tab the browser would reject and a BOM.
+        StringBuilder json = new StringBuilder("﻿[");
+        int items = 0;
+        while (json.length() < WebBackend.SPOOL_IN_HEAP_BYTES + 1024) {
+            if (items > 0) json.append(',');
+            json.append("{\"num\":").append(items).append(",\"name\":\"Série\t").append(items).append("\"}");
+            items++;
+        }
+        json.append(']');
+        byte[] body = json.toString().getBytes("UTF-8");
+        for (boolean gzip : new boolean[] { false, true }) {
+            java.io.File dir = newSpoolDir();
+            try (FixedBodyServer server = new FixedBodyServer(body, gzip)) {
+                WebBackend backend = new WebBackend(new HttpFetcher(), "/api", dir);
+                String id = WebBackendTest.register(backend, server.url());
+                WebBackend.Response response = backend.handle("GET", "/xtream",
+                    WebBackendTest.query("targetId", id, "action", "get_series", "username", "u", "password", "p"), null);
+                assertEquals("status", 200, Integer.valueOf(response.status));
+                String[] files = dir.list();
+                assertEquals("one spooled file while unserved", 1, Integer.valueOf(files == null ? 0 : files.length));
+                long length = response.bodyLength();
+                String text = response.bodyText();
+                assertEquals("Content-Length matches the body", Long.valueOf(length), Long.valueOf(text.getBytes("UTF-8").length));
+                assertTrue("valid for JSON.parse (gzip " + gzip + ")", Json.validate(text));
+                Map<String, Object> out = (Map<String, Object>) Json.parse(text);
+                assertEquals("action", "get_series", out.get("action"));
+                java.util.List<Object> payload = (java.util.List<Object>) out.get("payload");
+                assertEquals("every item", Integer.valueOf(items), Integer.valueOf(payload.size()));
+                assertEquals("tab kept as an escape", "Série\t0", ((Map<String, Object>) payload.get(0)).get("name"));
+                files = dir.list();
+                assertEquals("file deleted once served", 0, Integer.valueOf(files == null ? 0 : files.length));
+            }
+        }
+    }
+
+    public void testSmallSpooledXtreamAnswerKeepsTheHeapPath() throws Exception {
+        java.io.File dir = newSpoolDir();
+        try (FixedBodyServer server = new FixedBodyServer("{\"user_info\":{\"auth\":1}}".getBytes("UTF-8"), false)) {
+            WebBackend backend = new WebBackend(new HttpFetcher(), "/api", dir);
+            String id = WebBackendTest.register(backend, server.url());
+            WebBackend.Response response = backend.handle("GET", "/xtream",
+                WebBackendTest.query("targetId", id, "action", "get_account_info"), null);
+            assertEquals("same envelope", "{\"action\":\"get_account_info\",\"payload\":{\"user_info\":{\"auth\":1}}}", response.bodyText());
+            String[] files = dir.list();
+            assertEquals("nothing left behind", 0, Integer.valueOf(files == null ? 0 : files.length));
+        }
+    }
+
     private void assertBrokenPlaylistImport(String mode) throws Exception {
         try (BrokenBodyServer server = new BrokenBodyServer(mode)) {
             WebBackend backend = new WebBackend(new HttpFetcher(), "/api");
