@@ -253,7 +253,11 @@ cd tv-shell/android && ./gradlew :backend:check :app:assembleRelease
 - Memory on a 1 GB device: provider answers are capped at an eighth of the app's
   heap (64 MB at most, about 32 MB on a Fire TV Stick Lite) and refused before
   download when the declared size is larger (`ERR_RESPONSE_TOO_LARGE`). Xtream
-  and Stalker JSON answers are validated and passed through verbatim instead
+  answers are the exception: they are received into a file in the app cache
+  (up to 512 MB, a BOM dropped and raw control characters in strings escaped
+  on the way) and, above 4 MB, served from it inside the `{ action, payload }`
+  envelope, so a 100 MB series catalogue never sits in the heap. Stalker JSON
+  answers are validated and passed through verbatim instead
   of being rebuilt as maps; responses are encoded straight to UTF-8 in chunks
   (no doubling buffer, no final copy) and served from them. An M3U import is
   parsed and written in one pass: the parser walks the text without splitting
@@ -320,8 +324,9 @@ tv-shell/
   and banner; `versionName` is bumped by hand.
 - Only `http`/`https` provider URLs; no EPG, downloads or embedded MPV (PWA
   limits).
-- Playlists and portal answers larger than an eighth of the app's memory (about
-  32 MB on a 1 GB stick) are refused with `ERR_RESPONSE_TOO_LARGE`.
+- Playlists and Stalker answers larger than an eighth of the app's memory
+  (about 32 MB on a 1 GB stick) are refused with `ERR_RESPONSE_TOO_LARGE`;
+  Xtream answers go through a file and are accepted up to 512 MB.
 - The loopback server is reachable by other apps on the device (see the
   security model).
 
@@ -420,8 +425,9 @@ adb shell dumpsys package com.amazon.webview.chromium | grep versionName
   offers it, because it reports a manifest the page may not read (no CORS) as
   that same network error, and VLC plays those.
 - **"Error, something went wrong (ERR_RESPONSE_TOO_LARGE)"** when adding a
-  source: the playlist or portal answer is larger than the device can hold; use
-  a smaller export (one country, no VOD) or an Xtream portal.
+  source: the playlist or Stalker answer is larger than the device can hold; use
+  a smaller export (one country, no VOD) or an Xtream portal (Xtream catalogues
+  are streamed through a file, up to 512 MB).
 - **The screensaver starts on a list**: intended; the screen stays on while a
   stream plays.
 

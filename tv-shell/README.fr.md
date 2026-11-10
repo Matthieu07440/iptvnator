@@ -136,9 +136,10 @@ adb shell dumpsys package com.amazon.webview.chromium | grep versionName
   propose toujours : il signale ainsi un manifeste illisible par la page (sans
   CORS), que VLC lit.
 - **« Error, something went wrong (ERR_RESPONSE_TOO_LARGE) »** à l'ajout d'une
-  source : la playlist ou la réponse du portail dépasse ce que l'appareil peut
-  tenir en mémoire (environ 32 Mo sur un Stick de 1 Go) ; utilisez un export
-  plus petit (un pays, sans VOD) ou un portail Xtream.
+  source : la playlist ou la réponse du portail Stalker dépasse ce que
+  l'appareil peut tenir en mémoire (environ 32 Mo sur un Stick de 1 Go) ;
+  utilisez un export plus petit (un pays, sans VOD) ou un portail Xtream (ses
+  catalogues passent par un fichier, jusqu'à 512 Mo).
 - **L'écran de veille démarre sur une liste** : voulu ; l'écran reste allumé
   pendant la lecture d'un flux.
 
